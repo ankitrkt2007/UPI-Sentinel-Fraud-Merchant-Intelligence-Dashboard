@@ -6,12 +6,6 @@ UPI Sentinel is a **team-built Streamlit + Plotly analytics platform** developed
 
 Our team built the dashboard to turn cleaned UPI transaction, merchant, KYC and chargeback data into an interactive investigation and decision-support experience.
 
-## 👥 Team Project
-
-This repository contains the work developed collaboratively by our team. The dashboard, analytical logic, data preparation outputs and presentation-ready insights are intended to be submitted as a **team solution**, not an individual project.
-
-**Team:** Add the names / GitHub profiles of all team members here.
-
 ## 🎯 Problem We Address
 
 The solution focuses on identifying transaction and merchant patterns that may indicate elevated financial risk, including:

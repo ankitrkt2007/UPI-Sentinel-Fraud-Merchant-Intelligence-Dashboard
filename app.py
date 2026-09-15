@@ -1,76 +1,27 @@
-
-import re
-import base64
-import io
 from pathlib import Path
-
+import re
 import numpy as np
 import pandas as pd
 import plotly.express as px
-import plotly.graph_objects as go
 import streamlit as st
 
-
-# -----------------------------
-# Configuration
-# -----------------------------
-st.set_page_config(
-    page_title="UPI Sentinel | Fraud & Merchant Intelligence",
-    page_icon="💳",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
-
+st.set_page_config(page_title="UPI Sentinel | Fraud & Merchant Intelligence", page_icon="💳", layout="wide")
 ROOT = Path(__file__).resolve().parent
 DATA = ROOT / "data"
 
-TX_PREFIX = "transactions.b64."
-MERCHANT_PREFIX = "merchants.b64."
-KYC_PREFIX = "transactions_kyc_risk.b64."
-CB_PREFIX = "chargebacks.b64."
+MCC_CATEGORY = {
+    "4131":"Transport", "4814":"Telecom", "5311":"Department Store", "5411":"Grocery",
+    "5699":"Apparel", "5812":"Food Services", "5912":"Healthcare",
+    "5942":"Books & Stationery", "5999":"Other Retail", "7011":"Hotel & Lodging"
+}
 
+def norm_id(v):
+    if pd.isna(v): return ""
+    return re.sub(r"[^A-Z0-9]", "", str(v).upper().strip())
 
-# -----------------------------
-# Styling
-# -----------------------------
-st.markdown(
-    """
-<style>
-    .stApp { background: #f6f8fb; }
-    [data-testid="stSidebar"] { background: #111827; }
-    [data-testid="stSidebar"] * { color: #e5e7eb !important; }
-    .hero { padding: 22px 26px; border-radius: 18px; background: linear-gradient(135deg, #111827 0%, #1f2937 55%, #334155 100%); color: white; margin-bottom: 18px; }
-    .hero h1 { margin: 0; font-size: 2rem; letter-spacing: -0.03em; }
-    .hero p { margin: 7px 0 0 0; color: #cbd5e1; font-size: 0.98rem; }
-    .section-title { font-size: 1.25rem; font-weight: 700; color: #111827; margin: 14px 0 8px 0; }
-    .small-note { color: #64748b; font-size: 0.82rem; }
-    .risk-high { color: #b91c1c; font-weight: 700; }
-    .risk-medium { color: #a16207; font-weight: 700; }
-    .risk-low { color: #15803d; font-weight: 700; }
-    .insight { padding: 14px 16px; border-left: 4px solid #334155; background: white; border-radius: 10px; margin: 8px 0; }
-    div[data-testid="stMetric"] { background: white; border: 1px solid #e5e7eb; padding: 12px 14px; border-radius: 12px; }
-    .stTabs [data-baseweb="tab-list"] { gap: 6px; }
-    .stTabs [data-baseweb="tab"] { border-radius: 9px; padding: 8px 14px; }
-</style>
-""",
-    unsafe_allow_html=True,
-)
-
-
-# -----------------------------
-# Helpers
-# -----------------------------
-def norm_id(value):
-    if pd.isna(value):
-        return ""
-    return re.sub(r"[^A-Z0-9]", "", str(value).upper().strip())
-
-
-def clean_category(value):
-    if pd.isna(value):
-        return "Unknown"
-    s = str(value).strip().lower().replace("_", " ").replace("-", " ")
-    s = re.sub(r"\s+", " ", s)
+def category(v):
+    if pd.isna(v): return "Unknown"
+    s = str(v).strip().lower().replace("_", " ").replace("-", " ")
     if any(x in s for x in ["grocery", "kirana"]): return "Grocery"
     if any(x in s for x in ["department", "dept store"]): return "Department Store"
     if any(x in s for x in ["cloth", "apparel", "garment", "fashion"]): return "Apparel"
@@ -80,90 +31,79 @@ def clean_category(value):
     if any(x in s for x in ["transport", "travel", "bus", "taxi"]): return "Transport"
     if any(x in s for x in ["pharmacy", "medical", "chemist"]): return "Healthcare"
     if any(x in s for x in ["book", "stationery"]): return "Books & Stationery"
-    return str(value).strip().title()
-
-
-MCC_CATEGORY = {
-    "4131": "Transport", "4814": "Telecom", "5311": "Department Store",
-    "5411": "Grocery", "5699": "Apparel", "5812": "Food Services",
-    "5912": "Healthcare", "5942": "Books & Stationery", "5999": "Other Retail",
-    "7011": "Hotel & Lodging",
-}
-
+    return str(v).strip().title()
 
 def money(v):
-    if pd.isna(v): return "₹0"
-    v = float(v); av = abs(v)
-    if av >= 1e7: return f"₹{v/1e7:.2f} Cr"
-    if av >= 1e5: return f"₹{v/1e5:.2f} L"
+    v = float(v or 0)
+    if abs(v) >= 1e7: return f"₹{v/1e7:.2f} Cr"
+    if abs(v) >= 1e5: return f"₹{v/1e5:.2f} L"
     return f"₹{v:,.0f}"
-
 
 def pct(v): return f"{v:.2f}%"
 
-
 @st.cache_data(show_spinner=False)
 def load_data():
-    def read_bundled_csv(prefix):
-        parts = sorted(DATA.glob(prefix + "*"))
-        if not parts:
-            raise FileNotFoundError(f"Missing bundled dataset: {prefix}*")
-        payload = "".join(p.read_text().strip() for p in parts)
-        raw = base64.b64decode(payload)
-        return pd.read_csv(io.BytesIO(raw), compression="gzip")
+    required = {
+        "transactions_standardized.csv": "transactions",
+        "merchants_clean.csv": "merchants",
+        "transactions_kyc_merged.csv": "KYC/transaction risk",
+        "chargebacks_final_analysis.csv": "chargebacks",
+    }
+    missing = [f for f in required if not (DATA / f).exists()]
+    if missing:
+        raise FileNotFoundError("Missing data/ files: " + ", ".join(missing) + ". Upload the four CSV files from the project ZIP to the repository's data/ folder.")
 
-    tx = read_bundled_csv(TX_PREFIX)
-    mer = read_bundled_csv(MERCHANT_PREFIX)
-    kyc = read_bundled_csv(KYC_PREFIX)
-    cb = read_bundled_csv(CB_PREFIX)
+    tx = pd.read_csv(DATA / "transactions_standardized.csv")
+    mer = pd.read_csv(DATA / "merchants_clean.csv")
+    kyc = pd.read_csv(DATA / "transactions_kyc_merged.csv")
+    cb = pd.read_csv(DATA / "chargebacks_final_analysis.csv")
 
     tx["date"] = pd.to_datetime(tx["timestamp_clean"], errors="coerce")
-    tx["amount_clean"] = pd.to_numeric(tx["amount_clean"], errors="coerce")
+    tx["amount_clean"] = pd.to_numeric(tx["amount_clean"], errors="coerce").fillna(0)
     tx["txn_key"] = tx["txn_id"].map(norm_id)
     tx["merchant_key"] = tx["merchant_id"].map(norm_id)
-    tx["user_key"] = tx["user_id"].map(norm_id)
     tx["mcc_key"] = pd.to_numeric(tx["mcc_clean"], errors="coerce").round().astype("Int64").astype(str).replace("<NA>", "")
     tx["category"] = tx["mcc_key"].map(MCC_CATEGORY).fillna("Unknown")
 
     mer["merchant_key"] = mer["merchant_id"].map(norm_id)
-    mer["category_clean"] = mer["merchant_category"].map(clean_category)
-    merchant_lookup = mer.drop_duplicates("merchant_key")[["merchant_key", "merchant_name", "merchant_category", "category_clean", "business_type", "city", "state", "merchant_status", "declared_avg_ticket_size"]]
-    tx = tx.merge(merchant_lookup, on="merchant_key", how="left")
+    mer["category_clean"] = mer["merchant_category"].map(category)
+    cols = [c for c in ["merchant_key","merchant_name","merchant_category","category_clean","business_type","city","state","merchant_status"] if c in mer.columns]
+    tx = tx.merge(mer.drop_duplicates("merchant_key")[cols], on="merchant_key", how="left")
 
     cb["txn_key"] = cb["txn_id_clean"].map(norm_id)
-    cb["disputed_amount_clean"] = pd.to_numeric(cb["disputed_amount_clean"], errors="coerce")
+    cb["disputed_amount_clean"] = pd.to_numeric(cb["disputed_amount_clean"], errors="coerce").fillna(0)
     tx["has_chargeback"] = tx["txn_key"].isin(set(cb["txn_key"].dropna()))
-    cb_summary = cb.groupby("txn_key", dropna=False).agg(chargeback_count=("complaint_id", "count"), total_disputed_amount=("disputed_amount_clean", "sum"), max_severity=("severity", lambda s: ", ".join(sorted(set(s.dropna().astype(str)))))).reset_index()
-    tx = tx.merge(cb_summary, on="txn_key", how="left")
+    cb_sum = cb.groupby("txn_key", dropna=False).agg(chargeback_count=("complaint_id","count"), disputed_amount=("disputed_amount_clean","sum")).reset_index()
+    tx = tx.merge(cb_sum, on="txn_key", how="left")
     tx["chargeback_count"] = tx["chargeback_count"].fillna(0).astype(int)
-    tx["total_disputed_amount"] = tx["total_disputed_amount"].fillna(0)
+    tx["disputed_amount"] = tx["disputed_amount"].fillna(0)
 
     kyc["txn_key"] = kyc["txn_id"].map(norm_id)
     for c in ["high_risk_record", "identity_conflict_flag"]:
-        if c in kyc.columns: kyc[c] = kyc[c].fillna(False).astype(bool)
-    risk_cols = ["txn_key", "high_risk_record", "identity_conflict_flag", "risk_segments", "kyc_statuses", "kyc_record_count", "pan_count", "aadhaar_count"]
-    risk = kyc[[c for c in risk_cols if c in kyc.columns]].drop_duplicates("txn_key")
-    tx = tx.merge(risk, on="txn_key", how="left")
+        if c in kyc: kyc[c] = kyc[c].fillna(False).astype(bool)
+    rcols = [c for c in ["txn_key","high_risk_record","identity_conflict_flag","risk_segments"] if c in kyc]
+    tx = tx.merge(kyc[rcols].drop_duplicates("txn_key"), on="txn_key", how="left")
     tx["high_risk_record"] = tx.get("high_risk_record", False).fillna(False).astype(bool)
     tx["identity_conflict_flag"] = tx.get("identity_conflict_flag", False).fillna(False).astype(bool)
-    tx["risk_segments"] = tx.get("risk_segments", "").fillna("Unknown")
-    tx["category"] = tx["category"].replace("", np.nan).fillna(tx["category_clean"]).fillna("Unknown")
+    tx["risk_segments"] = tx.get("risk_segments", "Unknown").fillna("Unknown")
+    tx["category"] = tx["category"].replace("Unknown", np.nan).fillna(tx["category_clean"]).fillna("Unknown")
     return tx, mer, cb
 
-
-def merchant_risk_table(df):
-    g = df.groupby(["merchant_key", "merchant_name", "category"], dropna=False).agg(transactions=("txn_id", "count"), successful=("status_clean", lambda s: (s == "SUCCESS").sum()), failed=("status_clean", lambda s: (s == "FAILED").sum()), transaction_value=("amount_clean", "sum"), chargebacks=("has_chargeback", "sum"), identity_conflicts=("identity_conflict_flag", "sum"), high_risk_kyc=("high_risk_record", "sum")).reset_index()
-    g["chargeback_rate"] = np.where(g["transactions"] > 0, g["chargebacks"] / g["transactions"] * 100, 0)
-    g["failure_rate"] = np.where(g["transactions"] > 0, g["failed"] / g["transactions"] * 100, 0)
-    g["identity_rate"] = np.where(g["transactions"] > 0, g["identity_conflicts"] / g["transactions"] * 100, 0)
-    g["high_risk_rate"] = np.where(g["transactions"] > 0, g["high_risk_kyc"] / g["transactions"] * 100, 0)
-    def minmax(s):
-        if s.max() == s.min(): return pd.Series(0.0, index=s.index)
-        return (s - s.min()) / (s.max() - s.min()) * 100
-    g["risk_score"] = (0.40 * minmax(g["chargeback_rate"]) + 0.25 * minmax(g["high_risk_rate"]) + 0.20 * minmax(g["identity_rate"]) + 0.15 * minmax(g["failure_rate"])).round(1)
-    g["risk_level"] = pd.cut(g["risk_score"], bins=[-0.1, 30, 60, 80, 100.1], labels=["Low", "Medium", "High", "Critical"])
-    return g.sort_values(["risk_score", "transactions"], ascending=[False, False])
-
+def risk_table(df):
+    g = df.groupby(["merchant_key","merchant_name","category"], dropna=False).agg(
+        transactions=("txn_id","count"), successful=("status_clean",lambda s:(s=="SUCCESS").sum()),
+        failed=("status_clean",lambda s:(s=="FAILED").sum()), value=("amount_clean","sum"),
+        chargebacks=("has_chargeback","sum"), identity_conflicts=("identity_conflict_flag","sum"),
+        high_risk=("high_risk_record","sum")).reset_index()
+    g["chargeback_rate"] = g["chargebacks"] / g["transactions"].clip(lower=1) * 100
+    g["failure_rate"] = g["failed"] / g["transactions"].clip(lower=1) * 100
+    g["identity_rate"] = g["identity_conflicts"] / g["transactions"].clip(lower=1) * 100
+    g["high_risk_rate"] = g["high_risk"] / g["transactions"].clip(lower=1) * 100
+    def mm(s):
+        return pd.Series(0.0,index=s.index) if s.max()==s.min() else (s-s.min())/(s.max()-s.min())*100
+    g["risk_score"] = (0.40*mm(g["chargeback_rate"])+0.25*mm(g["high_risk_rate"])+0.20*mm(g["identity_rate"])+0.15*mm(g["failure_rate"])).round(1)
+    g["risk_level"] = pd.cut(g["risk_score"],[-.1,30,60,80,100.1],labels=["Low","Medium","High","Critical"])
+    return g.sort_values(["risk_score","transactions"],ascending=[False,False])
 
 try:
     tx, merchants, chargebacks = load_data()
@@ -171,153 +111,80 @@ except Exception as e:
     st.error(f"Dashboard could not load the data: {e}")
     st.stop()
 
+st.markdown("""
+<style>
+.stApp{background:#f6f8fb}.hero{padding:22px 26px;border-radius:18px;background:linear-gradient(135deg,#111827,#334155);color:white;margin-bottom:18px}.hero h1{margin:0}.hero p{color:#cbd5e1}.insight{padding:14px 16px;border-left:4px solid #334155;background:white;border-radius:10px;margin:8px 0}div[data-testid="stMetric"]{background:white;border:1px solid #e5e7eb;padding:12px;border-radius:12px}
+</style>""", unsafe_allow_html=True)
+
 st.sidebar.markdown("## 💳 UPI Sentinel")
-st.sidebar.caption("Fraud & Merchant Intelligence")
-min_date = tx["date"].min().date(); max_date = tx["date"].max().date()
-date_range = st.sidebar.date_input("Date range", value=(min_date, max_date), min_value=min_date, max_value=max_date)
-if isinstance(date_range, tuple) and len(date_range) == 2:
-    start_date, end_date = date_range
-else:
-    start_date = end_date = date_range
-categories = st.sidebar.multiselect("Merchant category", sorted(tx["category"].dropna().unique()), default=sorted(tx["category"].dropna().unique()))
-statuses = st.sidebar.multiselect("Transaction status", sorted(tx["status_clean"].dropna().unique()), default=sorted(tx["status_clean"].dropna().unique()))
-filtered = tx[(tx["date"].dt.date >= start_date) & (tx["date"].dt.date <= end_date) & tx["category"].isin(categories) & tx["status_clean"].isin(statuses)].copy()
+st.sidebar.caption("Fraud & Merchant Intelligence • Team Project")
+min_d,max_d=tx.date.min().date(),tx.date.max().date()
+rng=st.sidebar.date_input("Date range",(min_d,max_d),min_value=min_d,max_value=max_d)
+start,end=(rng if isinstance(rng,tuple) and len(rng)==2 else (rng,rng))
+cats=st.sidebar.multiselect("Merchant category",sorted(tx.category.dropna().unique()),default=sorted(tx.category.dropna().unique()))
+statuses=st.sidebar.multiselect("Transaction status",sorted(tx.status_clean.dropna().unique()),default=sorted(tx.status_clean.dropna().unique()))
+f=tx[(tx.date.dt.date>=start)&(tx.date.dt.date<=end)&tx.category.isin(cats)&tx.status_clean.isin(statuses)].copy()
 
-st.markdown('<div class="hero"><h1>UPI Sentinel</h1><p>Fraud & Merchant Intelligence Platform • TransOrg AgentIQ Datathon</p></div>', unsafe_allow_html=True)
-tab1, tab2, tab3, tab4, tab5 = st.tabs(["Executive Overview", "Fraud Intelligence", "Merchant Risk", "Chargebacks & KYC", "Ask UPI Sentinel"])
+st.markdown('<div class="hero"><h1>UPI Sentinel</h1><p>Fraud & Merchant Intelligence Platform • TransOrg AgentIQ Datathon</p></div>',unsafe_allow_html=True)
+t1,t2,t3,t4,t5=st.tabs(["Executive Overview","Fraud Intelligence","Merchant Risk","Chargebacks & KYC","Ask UPI Sentinel"])
 
-with tab1:
-    st.markdown('<div class="section-title">Executive Overview</div>', unsafe_allow_html=True)
-    total = len(filtered); success = int((filtered["status_clean"] == "SUCCESS").sum()); failed = int((filtered["status_clean"] == "FAILED").sum()); pending = int((filtered["status_clean"] == "PENDING").sum())
-    value = filtered.loc[filtered["status_clean"] == "SUCCESS", "amount_clean"].sum(); cb_count = int(filtered["has_chargeback"].sum()); identity = int(filtered["identity_conflict_flag"].sum()); highrisk = int(filtered["high_risk_record"].sum())
-    cols = st.columns(8)
-    for c, label, val in zip(cols, ["Transactions", "Successful", "Success rate", "Successful value", "Chargeback-linked", "Failed", "Identity conflicts", "High-risk KYC"], [f"{total:,}", f"{success:,}", pct(success/total*100 if total else 0), money(value), f"{cb_count:,}", f"{failed:,}", f"{identity:,}", f"{highrisk:,}"]): c.metric(label, val)
-    st.markdown("**Transaction value trend**")
-    trend = filtered[filtered["status_clean"] == "SUCCESS"].assign(month=filtered.loc[filtered["status_clean"] == "SUCCESS", "date"].dt.to_period("M").astype(str)).groupby("month", as_index=False).agg(transaction_value=("amount_clean", "sum"))
-    fig = px.area(trend, x="month", y="transaction_value", labels={"month": "Month", "transaction_value": "Successful transaction value"})
-    fig.update_layout(height=360, margin=dict(l=10, r=10, t=15, b=10))
-    st.plotly_chart(fig, use_container_width=True)
-    left, right = st.columns(2)
-    with left:
-        status_df = filtered["status_clean"].value_counts().rename_axis("status").reset_index(name="count")
-        fig = px.pie(status_df, names="status", values="count", hole=.5, title="Transaction status mix")
-        fig.update_layout(height=340)
-        st.plotly_chart(fig, use_container_width=True)
-    with right:
-        cat = filtered.groupby("category", as_index=False).agg(transactions=("txn_id", "count"), value=("amount_clean", "sum")).sort_values("transactions", ascending=True)
-        fig = px.bar(cat, x="transactions", y="category", orientation="h", title="Transaction volume by category")
-        fig.update_layout(height=340)
-        st.plotly_chart(fig, use_container_width=True)
-    st.markdown('<div class="insight"><b>Interpretation:</b> Use the filters to isolate a period, category, or status before moving into merchant-level investigation.</div>', unsafe_allow_html=True)
+with t1:
+    total=len(f); succ=int((f.status_clean=="SUCCESS").sum()); fail=int((f.status_clean=="FAILED").sum()); pend=int((f.status_clean=="PENDING").sum()); val=f.loc[f.status_clean=="SUCCESS","amount_clean"].sum(); cbn=int(f.has_chargeback.sum()); ident=int(f.identity_conflict_flag.sum()); high=int(f.high_risk_record.sum())
+    for c,l,v in zip(st.columns(8),["Transactions","Successful","Success rate","Successful value","Chargeback-linked","Failed","Identity conflicts","High-risk KYC"],[f"{total:,}",f"{succ:,}",pct(succ/total*100 if total else 0),money(val),f"{cbn:,}",f"{fail:,}",f"{ident:,}",f"{high:,}"]): c.metric(l,v)
+    s=f[f.status_clean=="SUCCESS"].assign(month=f[f.status_clean=="SUCCESS"].date.dt.to_period("M").astype(str)).groupby("month",as_index=False).amount_clean.sum()
+    st.plotly_chart(px.area(s,x="month",y="amount_clean",labels={"amount_clean":"Successful transaction value"},title="Successful transaction value trend"),use_container_width=True)
+    a,b=st.columns(2)
+    with a: st.plotly_chart(px.pie(f.status_clean.value_counts().rename_axis("status").reset_index(name="count"),names="status",values="count",hole=.5,title="Transaction status mix"),use_container_width=True)
+    with b: st.plotly_chart(px.bar(f.category.value_counts().rename_axis("category").reset_index(name="transactions").sort_values("transactions"),x="transactions",y="category",orientation="h",title="Transaction volume by category"),use_container_width=True)
 
-with tab2:
-    st.markdown('<div class="section-title">Fraud & Transaction Intelligence</div>', unsafe_allow_html=True)
-    cat = filtered.groupby("category", as_index=False).agg(transactions=("txn_id", "count"), chargebacks=("has_chargeback", "sum"), failed=("status_clean", lambda s: (s == "FAILED").sum()))
-    cat["chargeback_rate"] = np.where(cat["transactions"] > 0, cat["chargebacks"] / cat["transactions"] * 100, 0)
-    left, right = st.columns(2)
-    with left:
-        fig = px.bar(cat.sort_values("transactions"), x="transactions", y="category", orientation="h", title="Transaction volume")
-        fig.update_layout(height=380)
-        st.plotly_chart(fig, use_container_width=True)
-    with right:
-        fig = px.bar(cat.sort_values("chargeback_rate"), x="chargeback_rate", y="category", orientation="h", text="chargeback_rate", title="Chargeback rate by category")
-        fig.update_traces(texttemplate="%{text:.2f}%", textposition="outside")
-        fig.update_layout(height=380, margin=dict(l=10, r=35, t=50, b=10))
-        st.plotly_chart(fig, use_container_width=True)
-    daily = filtered.assign(day=filtered["date"].dt.date).groupby("day", as_index=False).agg(failed=("status_clean", lambda s: (s == "FAILED").sum()), chargebacks=("has_chargeback", "sum"))
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(x=daily["day"], y=daily["failed"], mode="lines", name="Failed"))
-    fig.add_trace(go.Scatter(x=daily["day"], y=daily["chargebacks"], mode="lines", name="Chargeback-linked"))
-    fig.update_layout(title="Daily failure and chargeback activity", height=360, margin=dict(l=10, r=10, t=50, b=10))
-    st.plotly_chart(fig, use_container_width=True)
-    r = merchant_risk_table(filtered).head(10).sort_values("risk_score", ascending=True)
-    fig = px.bar(r, x="risk_score", y="merchant_name", orientation="h", text="risk_score", title="Top merchant risk signals")
-    fig.update_traces(textposition="outside")
-    fig.update_layout(height=390, margin=dict(l=10, r=35, t=50, b=10))
-    st.plotly_chart(fig, use_container_width=True)
+with t2:
+    c=f.groupby("category",as_index=False).agg(transactions=("txn_id","count"),chargebacks=("has_chargeback","sum"),failed=("status_clean",lambda s:(s=="FAILED").sum()),identity_conflicts=("identity_conflict_flag","sum")); c["chargeback_rate"]=c.chargebacks/c.transactions.clip(lower=1)*100
+    a,b=st.columns(2)
+    with a: st.plotly_chart(px.bar(c.sort_values("transactions"),x="transactions",y="category",orientation="h",title="Transaction volume"),use_container_width=True)
+    with b: st.plotly_chart(px.bar(c.sort_values("chargeback_rate"),x="chargeback_rate",y="category",orientation="h",title="Chargeback rate by category",labels={"chargeback_rate":"Chargeback rate (%)"}),use_container_width=True)
+    d=f.assign(day=f.date.dt.date).groupby("day",as_index=False).agg(failed=("status_clean",lambda s:(s=="FAILED").sum()),chargebacks=("has_chargeback","sum"))
+    st.plotly_chart(px.line(d,x="day",y=["failed","chargebacks"],title="Daily failed and chargeback-linked activity"),use_container_width=True)
 
-with tab3:
-    st.markdown('<div class="section-title">Merchant Risk & Investigation Queue</div>', unsafe_allow_html=True)
-    min_tx = st.number_input("Minimum merchant transactions", min_value=1, max_value=500, value=10, help="Reduces noise from merchants with very small samples.")
-    risk_df = merchant_risk_table(filtered)
-    risk_df = risk_df[risk_df["transactions"] >= min_tx].copy()
-    if len(risk_df):
-        fig = px.scatter(risk_df, x="chargeback_rate", y="high_risk_rate", size="transactions", color="risk_level", hover_name="merchant_name", hover_data=["risk_score", "identity_rate", "failure_rate"], title="Merchant risk matrix", labels={"chargeback_rate":"Chargeback rate (%)", "high_risk_rate":"High-risk KYC rate (%)"})
-        fig.update_layout(height=500)
-        st.plotly_chart(fig, use_container_width=True)
-        top = risk_df.head(15).sort_values("risk_score", ascending=True)
-        fig = px.bar(top, x="risk_score", y="merchant_name", color="risk_level", orientation="h", text="risk_score", title="Highest-priority merchants")
-        fig.update_traces(textposition="outside")
-        fig.update_layout(height=520, margin=dict(l=10, r=35, t=50, b=10))
-        st.plotly_chart(fig, use_container_width=True)
-        queue = risk_df.head(30)[["merchant_name", "category", "transactions", "transaction_value", "chargebacks", "chargeback_rate", "identity_conflicts", "high_risk_kyc", "risk_score", "risk_level"]].copy()
-        queue["transaction_value"] = queue["transaction_value"].round(2)
-        st.dataframe(queue, use_container_width=True, hide_index=True)
-        st.download_button("Download investigation queue CSV", queue.to_csv(index=False).encode("utf-8"), "merchant_investigation_queue.csv", "text/csv")
-    else:
-        st.warning("No merchants meet the selected minimum transaction threshold.")
-    st.caption("Risk score = 40% chargeback rate + 25% high-risk KYC rate + 20% identity-conflict rate + 15% failure rate, min-max normalized across the displayed merchant population. It is a prioritization convention, not a confirmed-fraud classifier.")
+with t3:
+    st.caption("Risk score is an analytical prioritization signal, not a confirmed-fraud classifier.")
+    threshold=st.slider("Minimum transactions per merchant",1,100,10)
+    r=risk_table(f); rr=r[r.transactions>=threshold].copy()
+    a,b=st.columns(2)
+    with a: st.plotly_chart(px.scatter(rr,x="chargeback_rate",y="high_risk_rate",size="transactions",hover_name="merchant_name",color="risk_level",title="Merchant risk matrix",labels={"chargeback_rate":"Chargeback rate (%)","high_risk_rate":"High-risk KYC rate (%)"}),use_container_width=True)
+    with b: st.plotly_chart(px.bar(rr.head(15).sort_values("risk_score"),x="risk_score",y="merchant_name",orientation="h",title="Top merchant risk scores"),use_container_width=True)
+    cols=["merchant_name","category","transactions","value","chargebacks","chargeback_rate","identity_conflicts","high_risk","risk_score","risk_level"]
+    st.dataframe(rr[cols].head(50),use_container_width=True,hide_index=True)
+    st.download_button("Download investigation queue",rr[cols].to_csv(index=False).encode(),"upi_sentinel_investigation_queue.csv","text/csv")
 
-with tab4:
-    st.markdown('<div class="section-title">Chargebacks & KYC Signals</div>', unsafe_allow_html=True)
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Chargeback complaints", f"{len(chargebacks):,}")
-    c2.metric("Linked transactions", f"{int(filtered['has_chargeback'].sum()):,}")
-    c3.metric("Disputed amount", money(filtered.loc[filtered["has_chargeback"], "total_disputed_amount"].sum()))
-    left, right = st.columns(2)
-    with left:
-        reason = chargebacks["reason_code_clean"].fillna("UNKNOWN").astype(str).value_counts().rename_axis("reason").reset_index(name="count").head(10).sort_values("count", ascending=True)
-        fig = px.bar(reason, x="count", y="reason", orientation="h", title="Chargeback reasons")
-        fig.update_layout(height=420)
-        st.plotly_chart(fig, use_container_width=True)
-    with right:
-        sev = chargebacks["severity"].fillna("UNKNOWN").astype(str).str.upper().replace({"H":"HIGH","M":"MEDIUM","L":"LOW"}).value_counts().rename_axis("severity").reset_index(name="count")
-        fig = px.pie(sev, names="severity", values="count", hole=.52, title="Chargeback severity")
-        fig.update_layout(height=420)
-        st.plotly_chart(fig, use_container_width=True)
-    risk_series = filtered["risk_segments"].fillna("Unknown").astype(str).str.split(",").explode().str.strip().str.upper().replace("", "UNKNOWN").value_counts().rename_axis("risk_segment").reset_index(name="count")
-    fig = px.bar(risk_series, x="risk_segment", y="count", title="KYC risk-signal distribution")
-    fig.update_layout(height=330)
-    st.plotly_chart(fig, use_container_width=True)
-    st.markdown("**Required business question — current quarter**")
-    latest_q = filtered["date"].dt.to_period("Q").max(); qdf = filtered[filtered["date"].dt.to_period("Q") == latest_q].copy()
-    min_q_tx = st.number_input("Minimum transactions for category ranking", min_value=1, max_value=100, value=10, help="Avoids ranking tiny categories where one chargeback can create a misleading 100% ratio.")
-    qcat = qdf.groupby("category", as_index=False).agg(transactions=("txn_id","count"), chargebacks=("has_chargeback","sum")); qcat["chargeback_ratio"] = np.where(qcat["transactions"] > 0, qcat["chargebacks"] / qcat["transactions"] * 100, 0); qcat_rank = qcat[qcat["transactions"] >= min_q_tx].sort_values("chargeback_ratio", ascending=False)
-    if len(qcat_rank):
-        winner = qcat_rank.iloc[0]
-        st.success(f"**{winner['category']}** has the highest chargeback-to-transaction ratio in {latest_q}: **{winner['chargeback_ratio']:.2f}%** ({int(winner['chargebacks'])} chargeback-linked / {int(winner['transactions'])} transactions).")
-        fig = px.bar(qcat_rank.sort_values("chargeback_ratio"), x="chargeback_ratio", y="category", orientation="h", text="chargeback_ratio", title="Current-quarter chargeback ratio")
-        fig.update_traces(texttemplate="%{text:.2f}%", textposition="outside")
-        fig.update_layout(height=350, margin=dict(l=10, r=35, t=50, b=10))
-        st.plotly_chart(fig, use_container_width=True)
-    else: st.warning("No category meets the selected minimum transaction threshold.")
-    st.caption("Chargeback linkage is based on normalized transaction ID. The dataset does not provide a universal confirmed-fraud label.")
+with t4:
+    a,b=st.columns(2)
+    with a: st.plotly_chart(px.bar(chargebacks.reason.value_counts().rename_axis("reason").reset_index(name="complaints").head(10),x="complaints",y="reason",orientation="h",title="Top chargeback reasons"),use_container_width=True)
+    with b:
+        seg=f.risk_segments.value_counts().rename_axis("risk_segment").reset_index(name="transactions")
+        st.plotly_chart(px.bar(seg,x="transactions",y="risk_segment",orientation="h",title="KYC risk segments"),use_container_width=True)
+    q=tx[(tx.date.dt.quarter==tx.date.max().quarter)&(tx.date.dt.year==tx.date.max().year)].groupby("category",as_index=False).agg(transactions=("txn_id","count"),chargebacks=("has_chargeback","sum")); q=q[q.transactions>=10]; q["chargeback_ratio"]=q.chargebacks/q.transactions*100
+    if len(q):
+        top=q.sort_values("chargeback_ratio",ascending=False).iloc[0]
+        st.success(f"Latest-quarter highest chargeback ratio (minimum 10 transactions): **{top.category} — {top.chargeback_ratio:.2f}%** ({int(top.chargebacks)} linked / {int(top.transactions)} transactions)")
+        st.dataframe(q.sort_values("chargeback_ratio",ascending=False),use_container_width=True,hide_index=True)
+    else: st.info("No category meets the minimum transaction threshold in the latest quarter.")
 
-with tab5:
-    st.markdown('<div class="section-title">🤖 Ask UPI Sentinel</div>', unsafe_allow_html=True)
-    st.write("Ask a natural-language question. This local text-to-chart layer handles common business questions without paid API credits.")
-    examples = ["Show transaction trend by month", "Compare chargeback rate by merchant category", "Show failed transactions by category", "Which merchant category has the highest chargeback ratio this quarter?", "Show identity conflicts by merchant category"]
-    st.caption("Try: " + " · ".join(examples))
-    question = st.text_input("Business question", placeholder="e.g. Which merchant category has the highest chargeback ratio this quarter?")
-    if st.button("Analyze", type="primary") and question.strip():
-        q = question.lower().strip()
-        if "highest" in q and "chargeback" in q and "ratio" in q:
-            latest_q = filtered["date"].dt.to_period("Q").max(); qdf = filtered[filtered["date"].dt.to_period("Q") == latest_q]; qcat = qdf.groupby("category", as_index=False).agg(transactions=("txn_id","count"), chargebacks=("has_chargeback","sum")); qcat["ratio"] = np.where(qcat["transactions"] > 0, qcat["chargebacks"] / qcat["transactions"] * 100, 0); qcat = qcat[qcat["transactions"] >= 10].sort_values("ratio", ascending=False)
-            if len(qcat):
-                w = qcat.iloc[0]; st.success(f"{w['category']} is highest in {latest_q} at {w['ratio']:.2f}% ({int(w['chargebacks'])}/{int(w['transactions'])}).")
-                fig = px.bar(qcat.sort_values("ratio"), x="ratio", y="category", orientation="h", text="ratio", title="Chargeback ratio by category"); fig.update_traces(texttemplate="%{text:.2f}%", textposition="outside"); st.plotly_chart(fig, use_container_width=True)
-            else: st.warning("Not enough category volume to produce a stable ranking.")
-        elif ("trend" in q or "over time" in q) and ("transaction" in q or "volume" in q):
-            trend = filtered.assign(month=filtered["date"].dt.to_period("M").astype(str)).groupby("month", as_index=False).agg(transactions=("txn_id","count")); fig = px.line(trend, x="month", y="transactions", markers=True, title="Transaction trend by month"); st.plotly_chart(fig, use_container_width=True); st.info("Chart selected: **Line** — appropriate for a time trend.")
-        elif "chargeback" in q and "category" in q:
-            x = filtered.groupby("category", as_index=False).agg(transactions=("txn_id","count"), chargebacks=("has_chargeback","sum")); x["ratio"] = np.where(x["transactions"] > 0, x["chargebacks"] / x["transactions"] * 100, 0); fig = px.bar(x.sort_values("ratio"), x="ratio", y="category", orientation="h", text="ratio", title="Chargeback rate by category"); fig.update_traces(texttemplate="%{text:.2f}%", textposition="outside"); st.plotly_chart(fig, use_container_width=True); st.info("Chart selected: **Bar** — appropriate for category comparison.")
+with t5:
+    st.markdown("### Ask UPI Sentinel")
+    question=st.text_input("Ask a business question",placeholder="Which merchant category has the highest chargeback ratio this quarter?")
+    q=question.lower().strip()
+    if question:
+        if "highest" in q and "chargeback" in q and "category" in q:
+            latest=tx[(tx.date.dt.quarter==tx.date.max().quarter)&(tx.date.dt.year==tx.date.max().year)].groupby("category",as_index=False).agg(transactions=("txn_id","count"),chargebacks=("has_chargeback","sum")); latest=latest[latest.transactions>=10]; latest["chargeback_ratio"]=latest.chargebacks/latest.transactions*100; latest=latest.sort_values("chargeback_ratio",ascending=False)
+            if len(latest):
+                top=latest.iloc[0]; st.plotly_chart(px.bar(latest,x="chargeback_ratio",y="category",orientation="h",title="Latest-quarter chargeback ratio",labels={"chargeback_ratio":"Chargeback ratio (%)"}),use_container_width=True); st.info(f"**{top.category}** has the highest chargeback ratio at **{top.chargeback_ratio:.2f}%** among categories with at least 10 transactions.")
+        elif "trend" in q and ("transaction" in q or "value" in q):
+            d=f.assign(month=f.date.dt.to_period("M").astype(str)).groupby("month",as_index=False).amount_clean.sum(); st.plotly_chart(px.line(d,x="month",y="amount_clean",markers=True,title="Monthly transaction value"),use_container_width=True)
         elif "failed" in q and "category" in q:
-            x = filtered.assign(failed=filtered["status_clean"].eq("FAILED")).groupby("category", as_index=False).agg(failed=("failed","sum")); fig = px.bar(x.sort_values("failed"), x="failed", y="category", orientation="h", title="Failed transactions by category"); st.plotly_chart(fig, use_container_width=True); st.info("Chart selected: **Bar** — appropriate for category comparison.")
+            d=f[f.status_clean=="FAILED"].category.value_counts().rename_axis("category").reset_index(name="failed"); st.plotly_chart(px.bar(d,x="failed",y="category",orientation="h",title="Failed transactions by category"),use_container_width=True)
         elif "identity" in q and "category" in q:
-            x = filtered.groupby("category", as_index=False).agg(identity_conflicts=("identity_conflict_flag","sum")); fig = px.bar(x.sort_values("identity_conflicts"), x="identity_conflicts", y="category", orientation="h", title="Identity conflicts by category"); st.plotly_chart(fig, use_container_width=True); st.info("Chart selected: **Bar** — appropriate for category comparison.")
-        else: st.warning("I don't have a safe local mapping for that question yet. Start with one of the example questions above.")
-    st.markdown("---")
-    st.caption("Agent-ready design: the same interface can later connect to an LLM while keeping data execution constrained to approved metrics and columns.")
+            d=f.groupby("category",as_index=False).identity_conflict_flag.sum().rename(columns={"identity_conflict_flag":"identity_conflicts"}); st.plotly_chart(px.bar(d.sort_values("identity_conflicts"),x="identity_conflicts",y="category",orientation="h",title="Identity conflicts by category"),use_container_width=True)
+        else: st.warning("Try a question about chargeback ratio, transaction trend, failed transactions by category, or identity conflicts by category.")
 
-st.markdown("---")
-st.caption("UPI Sentinel • Built for TransOrg AgentIQ Datathon • Risk scores are analytical prioritization signals, not confirmed fraud labels.")
+st.divider()
+st.caption("UPI Sentinel is a team-built analytical dashboard. Risk indicators are prioritization signals and should be validated by investigators before action.")
